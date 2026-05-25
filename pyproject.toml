@@ -1,0 +1,11 @@
+[project]
+name = "clockyd"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "esptool>=5.2.0",
+    "font-to-py>=0.44.2",
+    "mpremote>=1.28.0",
+]
