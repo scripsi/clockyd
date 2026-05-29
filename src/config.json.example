@@ -1,0 +1,10 @@
+{
+  "wifi":[
+    {"ssid":"network1","key":"key1"},
+    {"ssid":"network2","key":"key2"}
+  ],
+  "debug":true,
+  "default_time":"12:34",
+  "hour_offset":1,
+  "ntp_server":"pool.ntp.org"
+}

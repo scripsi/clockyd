@@ -12,7 +12,8 @@ from gui.core.nanogui import refresh
 refresh(ssd, True)  # Initialise and clear display.
 
 # Standard library modules
-from machine import Pin, ADC, PWM
+from machine import Pin, ADC, PWM, SDCard
+import vfs
 import time
 import ntptime
 import json
@@ -25,22 +26,25 @@ from gui.widgets.textbox import Textbox
 from gui.core.writer import CWriter
 from gui.core.colors import *
 import gui.fonts.arial10 as small_font
-import gui.fonts.paperr50 as large_font
+import gui.fonts.papersb44 as large_font
 
 # *** GLOBAL CONSTANTS ***
+
+debug = True
 
 # Colours
 TEAL=create_color(12,0,80,80)
 screen_bg = BLACK
-clock_fg = BLACK
-clock_bg = TEAL
-info_fg = GREY
+clock_fg = TEAL
+clock_bg = BLACK
+info_fg = BLUE
 info_bg = BLACK
 
 # Clock dial dimensions
 clock_face_r = 60
-clock_index_r = 20
-clock_index_inner_r = 10
+clock_face_inner_r = 55
+clock_index_r = 15
+clock_index_inner_r = 1
 clock_h_x = 80
 clock_h_y = 80
 clock_m_x = 240
@@ -49,7 +53,16 @@ clock_pos_y = 20
 
 # *** GLOBAL CONFIG ***
 
-config={}
+default_config={
+  "wifi":[
+    {"ssid":"network1","key":"key1"},
+    {"ssid":"network2","key":"key2"}
+  ],
+  "debug":True,
+  "default_time":"12:34",
+  "hour_offset":1,
+  "ntp_server":"pool.ntp.org"
+}
 
 # backlight control for screen
 backlight = Pin(21, Pin.OUT)
@@ -65,8 +78,12 @@ red_led = Pin(4, Pin.OUT)
 green_led = Pin(16, Pin.OUT)
 blue_led = Pin(17, Pin.OUT)
 
+# SD card (must be FAT formatted)
+sd = SDCard(slot=2, sck=Pin(18), miso=Pin(19), mosi=Pin(23), cs=Pin(5))
+
 # WiFi
 wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
 
 # Text labels
 CWriter.set_textpos(ssd, 0, 0)  # In case previous tests have altered it
@@ -78,7 +95,7 @@ clock_wri.set_clip(True, True, False)
 clock_width = clock_wri.stringlen('00')
 clock_height = large_font.height()
 
-info_box = Textbox(info_wri, 170,5,230,6, bdcolor=False)
+info_box = Textbox(info_wri, 170,5,310,6, bdcolor=False)
 hours_label = Label(clock_wri, clock_h_y-round(clock_height/2), clock_h_x-round(clock_width/2), clock_width, bdcolor=False, align=2)
 mins_label = Label(clock_wri, clock_m_y-round(clock_height/2), clock_m_x-round(clock_width/2), clock_width, bdcolor=False, align=2)
 
@@ -92,8 +109,9 @@ def set_backlight(percentage):
   backlight_pwm.duty(int(percentage * 10.23))    # 1023 / 100
 
 def msg(m):
-  info_box.append(m)
-  refresh(ssd)
+  if debug:
+    info_box.append(m)
+    refresh(ssd)
 
 def startup():
   
@@ -128,34 +146,45 @@ def load_config():
   #
 
   # Read config
-
+  config_filename="config.json"
+  msg("Mounting SDCard...")
   try:
-    f=open("config.json","r")
+    # Mount SD card and print directory listing
+    # SD card must be formatted with a file system recognised by ESP32 (FAT)
+    vfs.mount(sd, "/sd")
+    config_filename="/sd/config.json"
+  except OSError(EPERM):
+    msg("... SDCard already mounted")
+    config_filename="/sd/config.json"
+  except OSError:
+    msg("...SDCard not found. Will look for config on internal flash.")
+  try:
+    f=open(config_filename,"r")
     config=json.loads(f.read())
     f.close()
+    msg("Config file read successfully.")
     return config
   except:
-    msg("Couldn't read config")
-    raise RuntimeError("Couldn't read config")
+    msg("Couldn't read config! Using defaults.")
+    config=json.loads(default_config)
 
 def connect_network():
 
   # Connect to WiFi
-  msg('connecting to WIFI with SSID: ' + config['wifissid'])
-  wlan.active(True)
+  
   access_points=wlan.scan()
-  ssids=[ap[0].decode('UTF-8') for ap in access_points]
-  if config['wifissid'] in ssids:
-    msg("WiFi connection " + config['wifissid'] + " is available!")
-    wlan.connect(config['wifissid'], config['wifipass'])
+  available_ssids=[ap[0].decode('UTF-8') for ap in access_points]
+  usable_networks=[network for network in config["wifi"] if network["ssid"] in available_ssids]
+  if len(usable_networks) > 0:
+    network=usable_networks[0]
+    msg("WiFi connection " + network["ssid"] + " is available!")
+    wlan.connect(network['ssid'], network['key'])
     # Wait for connection
-    while True:
-      if wlan.status() < 0 or wlan.status() >= 3:
-        break
-      msg('Waiting for connection...')
+    while not wlan.isconnected():
+      # msg('Waiting for connection...')
       time.sleep(1)
     ip, subnet, gateway, dns=wlan.ifconfig()
-    msg('...connected! ip=' + ip)
+    msg('WiFi connected! Webrepl available on ' + ip + ':8266')
     time.sleep(1)
     msg("Setting time from network...")
     time_not_set = True
@@ -175,45 +204,53 @@ def connect_network():
   else:
     msg('WiFi connection not found. Offline!')
 
-def clock():
+def draw_clock():
 
-  while True:
-    t = time.localtime()
-    b = get_light_level()
-    if b > 2:
-      set_backlight(b)
-    else:
-      set_backlight(2)
-    if b < 50:
-      info_box.clear()
+  g = time.gmtime()
+  s = time.mktime(g)
+  t = time.gmtime(s+(config["hour_offset"]*3600))
     
-    # clear clock face
-    ssd.rect(0,0,ssd.width,165,screen_bg,True)
+  # clear clock face
+  ssd.rect(0,0,ssd.width,165,screen_bg,True)
 
-    # draw hours face
-    ssd.ellipse(clock_h_x,clock_h_y,clock_face_r,clock_face_r,clock_bg,True)
-    h_angle=math.radians(t[3]*30-90)
-    hx=clock_h_x+round(clock_face_r*math.cos(h_angle))
-    hy=clock_h_y+round(clock_face_r*math.sin(h_angle))
-    ssd.ellipse(hx,hy,clock_index_r,clock_index_r,clock_bg,True)
-    ssd.ellipse(hx,hy,clock_index_inner_r,clock_index_inner_r,clock_fg,True)
+  # draw hours face
+  ssd.ellipse(clock_h_x,clock_h_y,clock_face_r,clock_face_r,clock_fg,True)
+  ssd.ellipse(clock_h_x,clock_h_y,clock_face_inner_r,clock_face_inner_r,clock_bg,True)
+  h_angle=math.radians(t[3]*30-90)
+  hx=clock_h_x+round(clock_face_r*math.cos(h_angle))
+  hy=clock_h_y+round(clock_face_r*math.sin(h_angle))
+  ssd.ellipse(hx,hy,clock_index_r,clock_index_r,clock_fg,True)
+  # ssd.ellipse(hx,hy,clock_index_inner_r,clock_index_inner_r,clock_bg,True)
     
-    # draw minutes face
-    ssd.ellipse(clock_m_x,clock_m_y,clock_face_r,clock_face_r,clock_bg,True)
-    m_angle=math.radians(t[4]*6-90)
-    mx=clock_m_x+round(clock_face_r*math.cos(m_angle))
-    my=clock_m_y+round(clock_face_r*math.sin(m_angle))
-    ssd.ellipse(mx,my,clock_index_r,clock_index_r,clock_bg,True)
-    ssd.ellipse(mx,my,clock_index_inner_r,clock_index_inner_r,clock_fg,True)
+  # draw minutes face
+  ssd.ellipse(clock_m_x,clock_m_y,clock_face_r,clock_face_r,clock_fg,True)
+  ssd.ellipse(clock_m_x,clock_m_y,clock_face_inner_r,clock_face_inner_r,clock_bg,True)
+  m_angle=math.radians(t[4]*6-90)
+  mx=clock_m_x+round(clock_face_r*math.cos(m_angle))
+  my=clock_m_y+round(clock_face_r*math.sin(m_angle))
+  ssd.ellipse(mx,my,clock_index_r,clock_index_r,clock_fg,True)
+  # ssd.ellipse(mx,my,clock_index_inner_r,clock_index_inner_r,clock_bg,True)
 
-    hours_label.value('{:02d}'.format(t[3]))
-    mins_label.value('{:02d}'.format(t[4]))
-    refresh(ssd)
+  hours_label.value('{:02d}'.format(t[3]))
+  mins_label.value('{:02d}'.format(t[4]))
+  refresh(ssd)
 
 # *** MAIN PROGRAM **
 
 set_backlight(100)
 startup()
-config=load_config()
+config = load_config()
+debug = config["debug"]
 connect_network()
-clock()
+
+while True:
+  b = get_light_level()
+  if b > 2:
+    set_backlight(b)
+  else:
+    set_backlight(2)
+  if b < 50:
+    info_box.clear()
+  
+  draw_clock()
+  time.sleep(1)
